@@ -1,55 +1,51 @@
-var bunyan = require('bunyan');
-var BunyanSlack = require('bunyan-slack');
-var log;
+let raven = require('raven');
+let bunyan = require('bunyan');
+let BunyanSlack = require('bunyan-slack');
+let SentryStream = require('bunyan-sentry-stream').SentryStream;
 
-var formatter = function(record, levelName){
-	return {text: '[' + levelName + '] ' + record.msg + ' (source: ' + record.src.file + ' line: ' + record.src.line + ')' };
+let client = new raven.Client(config.server.sentry_dsn);
+let log;
+
+let formatter = function (record, levelName) {
+    return {
+        text: '[' + levelName + '] ' + record.msg + ' (source: ' + record.src.file + ' line: ' + record.src.line + ')'
+    };
 };
 
-try{
-	log = bunyan.createLogger({
-		src: true,
-		name: config.server.http.host,
-		streams: [{
-			type: 'rotating-file',
-			path: 'log',
-			period: '1d',   // daily rotation
-			count: 5        // keep 5 back copies
-		},
-		{
-			level: 'error',
-			stream: new BunyanSlack({
-				webhook_url: config.server.slack_url,
-				channel: '#cla-assistant',
-				username: 'CLA assistant',
-				customFormatter: formatter
-			})
-		},
-		{
-			level: 'info',
-			stream: new BunyanSlack({
-				webhook_url: config.server.slack_url,
-				channel: '@kharitonov',
-				username: 'CLA assistant',
-				customFormatter: formatter
-			})
-		}
+log = bunyan.createLogger({
+    src: true,
+    name: config.server.http.host,
+    streams: [{
+        name: 'stdout',
+        level: process.env.ENV == 'debug' ? 'info' : 'debug',
+        stream: process.stdout
+    }]
+});
 
-		]
-	});
-
-	// log.warn('hello form bunyan to slack');
+try {
+    log.addStream({
+        name: 'slack',
+        level: 'error',
+        stream: new BunyanSlack({
+            webhook_url: config.server.slack.url,
+            channel: config.server.slack.channel,
+            username: 'CLA Assistant',
+            customFormatter: formatter
+        })
+    });
 } catch (e) {
-	log = bunyan.createLogger({
-		src: true,
-		name: config.server.http.host,
-		streams: [{
-			type: 'rotating-file',
-			path: 'log',
-			period: '1d',   // daily rotation
-			count: 5        // keep 5 back copies
-		}]
-	});
+    log.info(e);
+}
+
+try {
+    log.addStream({
+        name: 'sentry',
+        level: 'warn',
+        type: 'raw', // Mandatory type for SentryStream
+        stream: new SentryStream(client)
+    });
+} catch (e) {
+    log.info(e);
 }
 
 module.exports = log;

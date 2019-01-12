@@ -14,5 +14,9 @@ src/client/app.min.js
 src/client/app.min.js.map
 .sass-cache
 .cfenv
+*.log
 log
 log.*
+.vscode/*
+jsconfig.json
+src/tests/acceptance_tests/codecept.conf.js

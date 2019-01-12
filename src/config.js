@@ -4,7 +4,7 @@
  * @title config
  * @overview Configuration Module
  */
-var path = require('path');
+let path = require('path');
 
 module.exports = {
     server: {
@@ -16,6 +16,8 @@ module.exports = {
             enterprise: !!process.env.GITHUB_HOST, // flag enterprise version
             version: process.env.GITHUB_VERSION || '3.0.0',
 
+            graphqlEndpoint: process.env.GITHUB_GRAPHQL || 'https://api.github.com/graphql',
+
             // required
             client: process.env.GITHUB_CLIENT,
             secret: process.env.GITHUB_SECRET,
@@ -23,16 +25,28 @@ module.exports = {
             // required
             user: process.env.GITHUB_USER,
             pass: process.env.GITHUB_PASS,
+            admin_users: process.env.GITHUB_ADMIN_USERS ? process.env.GITHUB_ADMIN_USERS.split(/\s*,\s*/) : [],
 
+            // required
             token: process.env.GITHUB_TOKEN,
 
             user_scope: ['user:email'],
-            admin_scope: ['user:email', 'public_repo', 'repo:status', 'read:repo_hook', 'write:repo_hook', 'read:org', 'gist']
+            admin_scope: ['user:email', 'public_repo', 'repo:status', 'read:repo_hook', 'write:repo_hook', 'read:org', 'gist'],
+
+            commit_bots: ['web-flow'],
+
+            //delay reaction on webhook
+            enforceDelay: parseInt(process.env.GITHUB_DELAY || '5000', 10),
+
+            //slow down API calls in order to avoid abuse rate limit
+            timeToWait: process.env.GITHUB_TIME_TO_WAIT || 1000
         },
 
         localport: process.env.PORT || 5000,
 
         always_recompile_sass: process.env.NODE_ENV === 'production' ? false : true,
+
+        cache_time: process.env.CACHE_TIME || 5,
 
         http: {
             protocol: process.env.PROTOCOL || 'http',
@@ -62,10 +76,35 @@ module.exports = {
         },
 
         slack: {
-            token: process.env.SLACK_TOKEN
+            url: process.env.SLACK_URL,
+            channel: process.env.SLACK_CHANNEL
         },
 
-        slack_url: process.env.SLACK_URL,
+        templates: {
+            login: process.env.LOGIN_PAGE_TEMPLATE || path.join(__dirname, 'client', 'login.html')
+        },
+
+        sentry_dsn: process.env.SENTRY_DSN,
+
+        api_access: {
+            free: ['/api/cla/get', '/api/cla/getLinkedItem'],
+            external: ['/api/cla/getAll'],
+            admin_only: [
+                '/api/cla/addSignature',
+                '/api/cla/hasSignature',
+                '/api/cla/terminateSignature',
+                '/api/cla/validate',
+                '/api/cla/getGist',
+                '/api/org/create',
+                '/api/org/remove',
+                '/api/repo/create',
+                '/api/repo/remove'
+            ]
+        },
+
+        feature_flag: {
+            required_signees: process.env.REQUIRED_SIGNEES || '',
+        },
 
         static: [
             path.join(__dirname, 'bower'),
@@ -89,18 +128,17 @@ module.exports = {
             path.join(__dirname, 'server', 'controller', 'default.js')
         ],
 
+        graphQueries: [
+            path.join(__dirname, 'server', 'graphQueries', '*.js')
+        ],
+
         middleware: [
             path.join(__dirname, 'server', 'middleware', '*.js')
         ],
 
         passport: [
             path.join(__dirname, 'server', 'passports', '*.js')
-        ]
+        ],
 
-    },
-
-    client: {
-        gacode: process.env.GACODE
     }
-
 };

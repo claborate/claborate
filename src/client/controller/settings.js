@@ -5,241 +5,322 @@
 // path: /detail/:ruser/:repo
 // *****************************************************
 
-module.controller('SettingsCtrl', ['$rootScope', '$scope', '$stateParams', '$HUB', '$RPCService', '$HUBService', '$window', '$sce', '$modal', '$q',
-	function ($rootScope, $scope, $stateParams, $HUB, $RPCService, $HUBService, $window, $sce, $modal, $q) {
+module.controller('SettingsCtrl', ['$rootScope', '$scope', '$stateParams', '$HUB', '$RPC', '$RPCService', '$HUBService', '$window', '$sce', '$modal', '$q', 'utils', '$log',
+    function ($rootScope, $scope, $stateParams, $HUB, $RPC, $RPCService, $HUBService, $window, $sce, $modal, $q, utils, $log) {
 
-		$scope.gist = {};
-		$scope.gistIndex = 0;
-		$scope.admin = false;
-		$scope.errorMsg = [];
-		$scope.loading = false;
-		$scope.gistUrlIsValid = true;
-		$scope.valid = {};
-		$scope.signatures = [];
-		$scope.contributors = [];
-		var webhook = {};
+        $scope.gist = {};
+        $scope.gistIndex = 0;
+        $scope.admin = false;
+        $scope.errorMsg = [];
+        $scope.loading = false;
+        $scope.gistUrlIsValid = true;
+        $scope.valid = {};
+        $scope.signatures = {};
+        $scope.contributors = [];
 
-		$scope.csvHeader = ['User Name', 'Repository Owner', 'Repository Name', 'CLA Title', 'Gist URL', 'Gist Version', 'Signed At'];
+        var webhook = {};
 
-		function gistArgs() {
-			var args = {
-				gist_url: $scope.repo.gist
-			};
-			if ($scope.gist.history && $scope.gist.history.length > 0) {
-				args.gist_version = $scope.gist.history[$scope.gistIndex].version;
-			}
-			return args;
-		}
+        var csvHeader = ['User Name', 'Repository Owner', 'Repository Name', 'CLA Title', 'Gist URL', 'Gist Version', 'Signed At', 'Signed for Organization'];
+        $scope.csvHeader = csvHeader.concat();
 
-		var validateGistUrl = function (gist_url) {
-			var valid = false;
-			valid = gist_url ? !!gist_url.match(/https:\/\/gist\.github\.com\/([a-zA-Z0-9_-]*)/) : false;
-			return valid ? gist_url : undefined;
-		};
+        function gistArgs() {
+            var args = {
+                gist_url: $scope.item.gist
+            };
+            if ($scope.gist.history && $scope.gist.history.length > 0) {
+                args.gist_version = $scope.gist.history[$scope.gistIndex].version;
+            }
 
-		$scope.open_error = function () {
-			$modal.open({
-				templateUrl: '/modals/templates/error_modal.html',
-				controller: 'ErrorCtrl'
-			});
-		};
+            return args;
+        }
 
-		$scope.getSignatures = function (claRepo) {
-			return $RPCService.call('cla', 'getAll', {
-				repo: claRepo.repo,
-				owner: claRepo.owner,
-				gist: {
-					gist_url: claRepo.gist
-				}
-			}, function (err, signatures) {
-				if (signatures && signatures.value) {
-					$scope.signatures = signatures.value;
-					$scope.contributors = signatures.value;
-				}
-			});
-		};
+        $scope.open_error = function () {
+            $modal.open({
+                templateUrl: '/modals/templates/error_modal.html',
+                controller: 'ErrorCtrl'
+            });
+        };
 
-		var getWebhook = function () {
-			return $RPCService.call('webhook', 'get', {
-				repo: $scope.repo.repo,
-				user: $scope.repo.owner
-			}, function(err, obj){
-				if (!err && obj && obj.value) {
-					webhook = obj.value;
-					$scope.valid.webhook = webhook.active;
-				}
-			});
-		};
+        $scope.getSignatures = function (linkedItem, gist_version, cb) {
+            return $RPC.call('cla', 'getAll', {
+                repoId: linkedItem.repoId,
+                orgId: linkedItem.orgId,
+                gist: {
+                    gist_url: linkedItem.gist,
+                    gist_version: gist_version
+                },
+                sharedGist: linkedItem.sharedGist
+            }, cb);
+        };
 
-		var getGithubUserData = function (login) {
-			return $HUBService.call('user', 'getFrom', {
-				user: login
-			});
-		};
+        var getCustomFields = function (linkedItem, gist_version, cb) {
+            utils.getGistContent(linkedItem.repoId, linkedItem.orgId, linkedItem.gist, gist_version).then(
+                function (gistContent) {
+                    if (gistContent.hasCustomFields) {
+                        $scope.csvHeader = csvHeader.concat();
+                        gistContent.customKeys.forEach(function (key) {
+                            var field = gistContent.customFields[key];
+                            $scope.csvHeader.push(field.title || key);
+                        });
+                        cb(null, gistContent.customKeys);
+                    } else {
+                        cb();
+                    }
+                },
+                function fail(err) {
+                    cb(err);
+                }
+            );
+        };
 
-		$scope.getContributors = function () {
-			return $scope.getSignatures($scope.repo).then(function (data) {
-				$scope.contributors = [];
-				if (data && data.value && data.value.length > 0) {
-					data.value.forEach(function (signature) {
-						var contributor = {};
-						contributor.user_name = signature.user;
-						contributor.repo_owner = $scope.repo.owner;
-						contributor.repo_name = $scope.repo.repo;
-						contributor.gist_name = $scope.getGistName();
-						contributor.gist_url = $scope.gist.url;
-						contributor.gist_version = signature.gist_version;
-						contributor.signed_at = signature.created_at;
-						$scope.contributors.push(contributor);
-						getGithubUserData(signature.user).then(function (user) {
-							contributor.html_url = user.html_url;
-							// $scope.contributors.push(user.value);
-						});
-					});
-				}
-			});
-		};
+        var getWebhook = function () {
+            return $RPCService.call('webhook', 'get', {
+                repo: $scope.item.repo,
+                owner: $scope.item.owner,
+                org: $scope.item.org
+            }, function (err, obj) {
+                if (!err && obj && obj.value) {
+                    webhook = obj.value;
+                    $scope.valid.webhook = webhook.active;
+                }
+            });
+        };
 
-		$scope.getGist = function () {
-			$RPCService.call('cla', 'getGist', {
-				repo: $scope.repo.repo,
-				owner: $scope.repo.owner,
-				gist: gistArgs()
-			}, function (err, data) {
-				if (!err && data.value) {
-					$scope.gist = data.value;
-					$scope.valid.gist = $scope.gist && $scope.gist.id ? true : false;
-				}
-				$scope.gist.linked = true;
-			});
-		};
+        $scope.getContributors = function (gist_version, cb) {
+            var customKeys;
+            getCustomFields($scope.item, gist_version, function (err, keys) {
+                if (err) {
+                    $log.info(err);
+                }
+                customKeys = keys ? keys : customKeys;
 
-		$scope.getGistName = function () {
-			var fileName = '';
-			if ($scope.gist && $scope.gist.files) {
-				fileName = Object.keys($scope.gist.files)[0];
-				fileName = $scope.gist.files[fileName].filename ? $scope.gist.files[fileName].filename : fileName;
-			}
-			return fileName;
-		};
+                $scope.getSignatures($scope.item, gist_version, function (err, data) {
+                    if (err) {
+                        $log.info(err);
+                    }
+                    $scope.contributors = [];
+                    if (data && data.value && data.value.length > 0) {
+                        data.value.forEach(function (signature) {
+                            var contributor = {};
+                            contributor.user_name = signature.user;
+                            contributor.repo_owner = signature.owner;
+                            contributor.repo_name = signature.repo;
+                            contributor.gist_name = $scope.getGistName();
+                            contributor.gist_url = signature.gist_url;
+                            contributor.gist_version = signature.gist_version;
+                            contributor.signed_at = signature.created_at;
+                            contributor.org_cla = signature.org_cla;
+                            if (customKeys && signature.custom_fields) {
+                                var customFields = JSON.parse(signature.custom_fields);
+                                customKeys.forEach(function (key) {
+                                    contributor[key] = customFields[key];
+                                });
+                            }
+                            $scope.contributors.push(contributor);
+                        });
+                    }
+                    if (typeof cb == 'function') {
+                        cb();
+                    }
+                });
+            });
 
-		// var showErrorMessage = function(text) {
-		//     var error = text;
-		//     $timeout(function(){
-		//         var i = $scope.errorMsg.indexOf(error);
-		//         if (i > -1) {
-		//             $scope.errorMsg.splice(i, 1);
-		//         }
-		//     }, 3000);
+        };
 
-		//     $scope.errorMsg.push(error);
-		// };
+        $scope.getGist = function () {
+            return $RPCService.call('cla', 'getGist', {
+                repo: $scope.item.repo,
+                owner: $scope.item.owner,
+                gist: gistArgs()
+            }, function (err, data) {
+                if (!err && data.value) {
+                    $scope.gist = data.value;
+                    $scope.valid.gist = $scope.gist && $scope.gist.id ? true : false;
+                    getCustomFields($scope.item, gistArgs().gist_version, function (err) {
+                        $scope.valid.gist = err ? false : $scope.valid.gist;
+                    });
+                }
+                $scope.gist.linked = true;
+            });
+        };
 
-		$scope.validateLinkedRepo = function () {
-			var promises = [];
-			// ng-if="!loading && gist.id.length > 0"
-			if ($scope.repo.gist) {
-				$scope.loading = true;
-				// $scope.getUsers();
-				promises.push($scope.getGist());
-				promises.push(getWebhook());
-				$scope.getSignatures($scope.repo);
-				$q.all(promises).then(function(){
-					$scope.loading = false;
-				});
-			}
-		};
+        $scope.getGistName = function () {
+            if (!$scope.item.gist) {
+                return '';
+            }
+            $scope.gist.fileName = $scope.gist.fileName ? $scope.gist.fileName : utils.getGistAttribute($scope.gist, 'filename');
 
-		$scope.isLinkActive = function(){
-			return !$scope.loading && $scope.valid.gist && $scope.valid.webhook ? true : false;
-		};
+            return $scope.gist.fileName;
+        };
 
-		$scope.update = function () {
-			$scope.gistUrlIsValid = validateGistUrl($scope.repo.gist);
-			if ($scope.repo.gist && !$scope.gistUrlIsValid) {
-				return;
-			}
-			if ($scope.repo.gist) {
-				$RPCService.call('webhook', 'create', {
-					repo: $scope.repo.repo,
-					owner: $scope.repo.owner
-				}, function (err, data) {
-					if (!err) {
-						$scope.repo.active = true;
-					}
-				});
-			} else {
-				$RPCService.call('webhook', 'remove', {
-					repo: $scope.repo.repo,
-					user: $scope.repo.owner
-				}, function (err) {
-					if (!err) {
-						$scope.repo.active = false;
-					}
-				});
-			}
-			$RPCService.call('repo', 'update', {
-				repo: $scope.repo.repo,
-				owner: $scope.repo.owner,
-				gist: $scope.repo.gist
-			}, function () {
-				$scope.validateLinkedRepo();
-			});
-		};
+        $scope.validateLinkedItem = function () {
+            var promises = [];
+            if ($scope.item.gist) {
+                $scope.loading = true;
+                promises.push($scope.getGist());
+                promises.push(getWebhook());
+                $q.all(promises).then(function () {
+                    $scope.signatures = $scope.getSignatures($scope.item, gistArgs().gist_version);
+                    $scope.loading = false;
+                });
+            }
+        };
 
-		$scope.renderHtml = function (html_code) {
-			return $sce.trustAsHtml(html_code);
-		};
+        $scope.isLinkActive = function () {
+            return (!$scope.loading && $scope.valid.gist && $scope.valid.webhook) || !$scope.item.gist;
+        };
 
-		var report = function (claRepo) {
-			var modal = $modal.open({
-				templateUrl: '/modals/templates/report.html',
-				controller: 'ReportCtrl',
-				windowClass: 'report',
-				scope: $scope,
-				resolve: {
-					repo: function () {
-						return claRepo;
-					}
-				}
-			});
-			// modal.result.then(function(args){});
-		};
+        $scope.renderHtml = function (html_code) {
+            return $sce.trustAsHtml(html_code);
+        };
 
-		$scope.getReport = function () {
-			if ($scope.signatures.length > 0) {
-				$scope.getContributors($scope.repo);
-				report($scope.repo);
-			}
-		};
+        var report = function (linkedItem) {
+            $modal.open({
+                templateUrl: '/modals/templates/report.html',
+                controller: 'ReportCtrl',
+                windowClass: 'report',
+                scope: $scope,
+                resolve: {
+                    item: function () {
+                        return linkedItem;
+                    }
+                }
+            });
+        };
 
-		$scope.upload = function(claRepo){
-			var modal = $modal.open({
-				templateUrl: '/modals/templates/upload.html',
-				controller: 'UploadCtrl',
-				windowClass: 'upload'
-			});
-			modal.result.then(function(users) {
-				$RPCService.call('cla', 'upload', {
-					repo: claRepo.repo,
-					owner: claRepo.owner,
-					users: users
-				}).then($scope.update);
-			});
-		};
+        $scope.getReport = function () {
+            if ($scope.signatures.value.length > 0) {
+                $scope.getContributors(gistArgs().gist_version);
+            }
+            report($scope.item);
+        };
 
-		$scope.validateLinkedRepo();
-	}
+        var validateRepoPr = function (repo, owner) {
+            $scope.validatePR = $RPC.call('cla', 'validatePullRequests', {
+                repo: repo,
+                owner: owner
+            }, function () {
+                $scope.popoverIsOpen = false;
+            });
+        };
+        var validateOrgPr = function (linkedItem) {
+            $RPCService.call('cla', 'validateOrgPullRequests', {
+                org: linkedItem.org
+            }).then(function () {
+                $scope.popoverIsOpen = false;
+            });
+        };
+
+        $scope.recheck = function (linkedItem) {
+            if (linkedItem.org) {
+                validateOrgPr(linkedItem);
+            } else {
+                validateRepoPr(linkedItem.repo, linkedItem.owner);
+            }
+        };
+
+        $scope.upload = function (linkedItem) {
+            $scope.popoverIsOpen = false;
+            getCustomFields(linkedItem, undefined, function (err, customFields) {
+                if (err) {
+                    //do nothing
+                }
+                var modal = $modal.open({
+                    templateUrl: '/modals/templates/upload.html',
+                    controller: 'UploadCtrl',
+                    windowClass: 'upload',
+                    resolve: {
+                        customFields: function () {
+                            return customFields;
+                        }
+                    }
+                });
+                modal.result.then(function (signatures) {
+                    $RPCService.call('cla', 'upload', {
+                        repo: linkedItem.repo,
+                        owner: linkedItem.owner || linkedItem.org,
+                        signatures: signatures
+                    }).then($scope.validateLinkedItem);
+                });
+            });
+        };
+
+        $scope.getBadge = function (claRepo) {
+            $scope.popoverIsOpen = false;
+            $modal.open({
+                templateUrl: '/modals/templates/badge.html',
+                controller: 'BadgeCtrl',
+                windowClass: 'get-badge',
+                resolve: {
+                    repo: function () {
+                        return claRepo;
+                    }
+                }
+            });
+        };
+
+        $scope.editLinkedItem = function (linkedItem, gist, gists) {
+            $scope.popoverIsOpen = false;
+            var modal = $modal.open({
+                templateUrl: '/modals/templates/editLinkedItem.html',
+                controller: 'EditLinkedItemCtrl',
+                windowClass: 'edit-linked-item',
+                resolve: {
+                    item: function () {
+                        return linkedItem;
+                    },
+                    gist: function () {
+                        return gist;
+                    },
+                    gists: function () {
+                        return gists;
+                    }
+                }
+            });
+            modal.result.then(function (updatedItem) {
+                updatedItem.fork = $scope.item.fork;
+                updatedItem.avatarUrl = $scope.item.avatarUrl;
+                $scope.item = updatedItem;
+                $scope.linkedItem = updatedItem;
+                $scope.validateLinkedItem();
+            }, function () {
+                // do nothing on cancel
+            });
+        };
+
+        $scope.getSignURL = function () {
+            return $scope.item.repo ? $window.location + $scope.item.owner + '/' + $scope.item.repo : $window.location + ' ' + $scope.item.org;
+        };
+
+        $scope.validateLinkedItem();
+    }
 ]);
 
-module.directive('settings', [function () {
-	return {
-		templateUrl: '/templates/settings.html',
-		controller: 'SettingsCtrl',
-		transclude: true,
-		scope: {
-			repo: '=',
-			user: '='
-		}
-	};
+module.directive('settings', ['$document', function ($document) {
+    return {
+        templateUrl: '/templates/settings.html',
+        controller: 'SettingsCtrl',
+        transclude: true,
+        scope: {
+            item: '=',
+            user: '=',
+            repos: '=',
+            gists: '='
+        },
+        link: function (scope, element) {
+            var documentClickHandler = function (event) {
+                var eventOutsideTarget = (element[0] !== event.target) && (element.find(event.target).length === 0);
+                if (eventOutsideTarget) {
+                    scope.$apply(function () {
+                        scope.popoverIsOpen = false;
+                    });
+                }
+            };
+
+            $document.on('click', documentClickHandler);
+            scope.$on('$destroy', function () {
+                $document.off('click', documentClickHandler);
+            });
+        }
+    };
 }]);

@@ -1,44 +1,156 @@
+let q = require('q');
+let request = require('request');
 
-//api
-// var github_api = require('../api/github');
-var https = require('https');
-var q = require('q');
+let cache = require('memory-cache');
+let config = require('../../config');
+let GitHubApi = require('github');
+let stringify = require('json-stable-stringify');
+let logger = require('../services/logger');
 
-var GitHubApi = require('github');
 
-module.exports = {
+// let githubApi;
 
-    call: function(call, done) {
+function callGithub(github, obj, fun, arg, stringArgs, done) {
+    let cacheKey = stringArgs;
+    let cachedRes = arg.noCache ? null : cache.get(cacheKey);
+    delete arg.noCache;
+    if (cachedRes && config.server.cache_time > 0 && typeof done === 'function') {
+        if (cachedRes.meta) {
+            cachedRes.data.meta = cachedRes.meta;
+        }
+        done(null, cachedRes.data);
 
-        var obj = call.obj;
-        var fun = call.fun;
-        var arg = call.arg || {};
-        var token = call.token;
-        var basicAuth = call.basicAuth;
+        return;
+    }
+    github[obj][fun](arg, function (err, res) {
+        if (res && !res.message && config.server.cache_time > 0) {
+            cache.put(cacheKey, {
+                data: res,
+                meta: res && res.meta ? res.meta : undefined
+            }, 60000 * config.server.cache_time);
+        }
 
-        var github = new GitHubApi({
-            protocol: config.server.github.protocol,
-            version: config.server.github.version,
-            host: config.server.github.api,
-            pathPrefix: config.server.github.enterprise ? '/api/v3' : null
+        if (typeof done === 'function') {
+            done(err, res);
+            // cacheMissCount++;
+        }
+    });
+}
+
+function concatData(collection, chunk) {
+    if (chunk) {
+        collection = collection ? collection : chunk instanceof Array ? [] : {};
+        collection = chunk instanceof Array ? collection.concat(chunk) : chunk;
+    }
+
+    return collection;
+}
+
+function newGithubApi() {
+    // githubApi = githubApi ? githubApi : new GitHubApi({
+    let githubApi = new GitHubApi({
+        protocol: config.server.github.protocol,
+        version: config.server.github.version,
+        host: config.server.github.api,
+        pathPrefix: config.server.github.enterprise ? '/api/v3' : null
+    });
+
+    return githubApi;
+}
+
+
+let githubService = {
+    resetList: {},
+
+    call: function (call, done) {
+        let arg = call.arg || {};
+        let basicAuth = call.basicAuth;
+        let data = null;
+        let deferred = q.defer();
+        let fun = call.fun;
+        let obj = call.obj;
+        let token = call.token;
+
+        let argWithoutNoCache = Object.assign({}, arg);
+        delete argWithoutNoCache.noCache;
+
+        let stringArgs = stringify({
+            obj: call.obj,
+            fun: call.fun,
+            arg: argWithoutNoCache,
+            token: call.token
         });
+        let github = newGithubApi();
 
-        if(!obj || !github[obj]) {
-            return done('obj required/obj not found');
+        function collectData(err, res) {
+            data = res && res.data ? concatData(data, res.data) : data;
+
+            let meta = {};
+            try {
+                meta.link = res.meta.link;
+                // meta.hasMore = !!meta.link && !!github.hasNextPage(res.meta.link);
+                meta.hasMore = !!meta.link && !!github.hasNextPage(res.meta);
+                meta.scopes = res.meta['x-oauth-scopes'];
+                if (res.meta['x-ratelimit-remaining'] < 100) {
+                    setRateLimit(call.token, res.meta['x-ratelimit-reset']);
+                    logger.info('rate limit exceeds for ', call);
+                }
+                delete res.meta;
+            } catch (ex) {
+                meta = null;
+            }
+
+            if (meta && meta.hasMore) {
+                try {
+                    github.getNextPage(meta, collectData);
+                } catch (error) {
+                    logger.error(new Error('Could not get next page ' + error).stack);
+                    if (typeof done === 'function') {
+                        done(err, data, meta);
+                    }
+                    deferred.resolve({
+                        data: data,
+                        meta: meta
+                    });
+                }
+            } else {
+                if (typeof done === 'function') {
+                    done(err, data, meta);
+                }
+                deferred.resolve({
+                    data: data,
+                    meta: meta
+                });
+            }
         }
 
-        if(!fun || !github[obj][fun]) {
-            return done('fun required/fun not found');
+        function reject(error) {
+            deferred.reject(error);
+            if (typeof done === 'function') {
+                done(error);
+            }
         }
 
-        if(token) {
+        if (!obj || !github[obj]) {
+            reject('obj required/obj not found');
+
+            return deferred.promise;
+        }
+
+        if (!fun || !github[obj][fun]) {
+            reject('fun required/fun not found');
+
+            return deferred.promise;
+        }
+
+        if (token) {
             github.authenticate({
                 type: 'oauth',
                 token: token
             });
         }
 
-        if(basicAuth) {
+        if (basicAuth) {
             github.authenticate({
                 type: 'basic',
                 username: basicAuth.user,
@@ -46,60 +158,65 @@ module.exports = {
             });
         }
 
-        github[obj][fun](arg, function(err, res) {
+        setTimeout(function () {
+            callGithub(github, obj, fun, arg, stringArgs, collectData);
+        }, getRateLimitTime(token));
 
-            var meta = {};
-
-            try {
-                meta.link = res.meta.link;
-                meta.hasMore = !!github.hasNextPage(res.meta.link);
-                meta.scopes = res.meta['x-oauth-scopes'];
-                delete res.meta;
-            } catch (ex) {
-                meta = null;
-            }
-
-            if(typeof done === 'function') {
-                done(err, res, meta);
-            }
-
-        });
-
+        return deferred.promise;
     },
 
-    direct_call: function(args, done) {
-        var deferred = q.defer();
-        var http_req = {};
-        var data = '';
-        http_req = https.request(args.url, function(res){
-            res.on('data', function(chunk) { data += chunk; });
-            res.on('end', function(){
-                data = data ? JSON.parse(data) : null;
-                var meta = {};
-                meta.scopes = res.headers['x-oauth-scopes'];
-                meta.link = res.headers.link;
+    hasNextPage: function (meta) {
+        let github = newGithubApi();
 
-                deferred.resolve({data: data, meta: meta});
+        return github.hasNextPage(meta);
+    },
 
-                if (typeof done === 'function') {
-                    done(null, {data: data, meta: meta});
-                }
-            });
-        });
+    getNextPage: function (meta, cb) {
+        let github = newGithubApi();
 
-        http_req.setHeader('Authorization', 'token ' + args.token);
-        http_req.setHeader('User-Agent', 'cla-assistant');
-        http_req.setHeader('Accept', 'application/vnd.github.moondragon+json');
+        return github.getNextPage(meta, cb);
+    },
 
-        http_req.end();
+    // getCacheData: function () {
+    //     return {
+    //         hit: cacheHitCount,
+    //         miss: cacheMissCount,
+    //         currentSize: cache.size()
+    //     };
+    // }
 
-        http_req.on('error', function (e) {
-            deferred.reject(e);
-
-            if (typeof done === 'function') {
-                done(e);
-            }
-        });
-        return deferred.promise;
+    callGraphql: function (query, token, cb) {
+        request.post({
+            headers: {
+                'Authorization': `bearer ${token}`,
+                'User-Agent': 'CLA assistant'
+            },
+            url: config.server.github.graphqlEndpoint,
+            body: query
+        }, cb);
     }
 };
+
+function getRateLimitTime(token) {
+    let remainingTime = githubService.resetList[token] ? githubService.resetList[token] - Date.now() : 0;
+
+    return Math.max(remainingTime, 0);
+}
+
+function removeRateLimit(token) {
+    try {
+        delete githubService.resetList[token];
+    } catch (e) {
+        logger.debug(e.stack);
+    }
+}
+
+function setRateLimit(token, limit) {
+    githubService.resetList[token] = limit * 1000;
+    let remainingTime = (limit * 1000) - Date.now();
+    setTimeout(function () {
+        removeRateLimit(token);
+    }, remainingTime);
+}
+
+module.exports = githubService;

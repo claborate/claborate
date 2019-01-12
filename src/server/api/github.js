@@ -1,6 +1,6 @@
 // module
-var github = require('../services/github');
-var merge = require('merge');
+let github = require('../services/github');
+let merge = require('merge');
 
 module.exports = {
     call: function(req, done) {
@@ -12,10 +12,5 @@ module.exports = {
                 meta: meta
             });
         });
-    },
-
-    direct_call: function(req, done) {
-        return github.direct_call(merge(req.args, {
-            token: req.user.token}), done);
     }
 };

@@ -1,52 +1,51 @@
+/* eslint no-console: "off"*/
 require('colors');
-var async = require('async');
-var express = require('express');
-var glob = require('glob');
-var merge = require('merge');
-var passport = require('passport');
-var path = require('path');
-var sass_middleware = require('node-sass-middleware');
-var cleanup = require('./middleware/cleanup');
+let async = require('async');
+let express = require('express');
+let glob = require('glob');
+let merge = require('merge');
+let passport = require('passport');
+let path = require('path');
+let sass_middleware = require('node-sass-middleware');
+let cleanup = require('./middleware/cleanup');
+let noSniff = require('dont-sniff-mimetype');
+let mongoose = require('mongoose');
 // var sass_middleware = require('node-sass-middleware');
 
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 // Load configuration
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 
 global.config = require('./../config');
 
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 // Express application
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 
-var app = express();
-var api = {};
-var webhooks = {};
+let app = express();
+let api = {};
+let webhooks = {};
 
-//redirect from http to https
+// redirect from http to https
 app.use(function (req, res, next) {
-	if (!req.headers['x-forwarded-proto'] || req.headers['x-forwarded-proto'] === 'https') {
-		next();
-		return;
-	}
-	var host = req.headers['x-forwarded-host'] || req.headers.host;
+    if (!req.headers['x-forwarded-proto'] || req.headers['x-forwarded-proto'] === 'https') {
+        next();
 
-	res.setHeader('location', 'https://' + host + req.url);
-	res.statusCode = 301;
-	res.end();
+        return;
+    }
+    let host = req.headers['x-forwarded-host'] || req.headers.host;
+
+    res.setHeader('location', 'https://' + host + req.url);
+    res.statusCode = 301;
+    res.end();
 });
 
 app.use(require('x-frame-options')());
-app.use(require('body-parser').json());
+app.use(require('body-parser').json({ limit: '5mb' }));
 app.use(require('cookie-parser')());
-app.use(require('cookie-session')({
-	secret: config.server.security.sessionSecret,
-	cookie: {
-		maxAge: config.server.security.cookieMaxAge
-	}
-}));
-app.use(passport.initialize());
-app.use(passport.session());
+app.use(noSniff());
+let expressSession = require('express-session');
+let MongoStore = require('connect-mongo')(expressSession);
 
 // custom mrepodleware
 app.use('/api', require('./middleware/param'));
@@ -59,231 +58,204 @@ app.use('/count', require('./middleware/param'));
 //     log.info('app error: ', err.stack);
 // });
 
+let bootstrap = function (files, callback) {
+    console.log('bootstrap'.bold, files.bold);
+
+    async.eachSeries(config.server[files], function (p, cb) {
+        glob(p, function (err, file) {
+            if (err) {
+                console.log('✖ '.bold.red + err);
+            }
+            if (file && file.length) {
+                file.forEach(function (f) {
+                    try {
+                        if (files === 'api') {
+                            api[path.basename(f, '.js')] = require(f);
+                        } else if (files === 'passport') {
+                            require(f);
+                        } else if (files === 'plugins') {
+                            global.plugins[path.basename(f, '.js')] = require(f);
+                        } else if (files === 'controller') {
+                            app.use('/', require(f));
+                        } else if (files === 'graphQueries') {
+                            require(f);
+                        } else if (files === 'documents') {
+                            global.models = merge(global.models, require(f));
+                        } else if (files === 'webhooks') {
+                            webhooks[path.basename(f, '.js')] = require(f);
+                        }
+                    } catch (ex) {
+                        console.log('✖ '.bold.red + path.relative(process.cwd(), f));
+                        console.log(ex.stack);
+
+                        return;
+                    }
+                    console.log('✓ '.bold.green + path.relative(process.cwd(), f));
+                });
+            }
+            cb();
+        });
+    }, callback);
+};
+
 async.series([
 
-	function(callback) {
-		console.log('checking configs'.bold);
+    function (callback) {
+        console.log('checking configs'.bold);
 
-		if(config.server.http.protocol !== 'http' && config.server.http.protocol !== 'https') {
-			throw new Error('PROTOCOL must be "http" or "https"');
-		}
+        function validateProtocol(protocol, msg) {
+            if (config.server[protocol].protocol !== 'http' && config.server[protocol].protocol !== 'https') {
+                throw new Error(msg + ' must be "http" or "https"');
+            }
+        }
+        validateProtocol('http', 'PROTOCOL');
+        validateProtocol('github', 'GITHUB_PROTOCOL');
 
-		if(config.server.github.protocol !== 'http' && config.server.github.protocol !== 'https') {
-			throw new Error('GITHUB_PROTOCOL must be "http" or "https"');
-		}
+        console.log('✓ '.bold.green + 'configs seem ok');
 
-		console.log('✓ '.bold.green + 'configs seem ok');
+        let url = require('./services/url');
 
-		var url = require('./services/url');
+        console.log('Host:        ' + url.baseUrl);
+        console.log('GitHub:      ' + url.githubBase);
+        console.log('GitHub-Api:  ' + url.githubApiBase);
+        callback();
+    },
 
-		console.log('Host:        ' + url.baseUrl);
-		console.log('GitHub:      ' + url.githubBase);
-		console.log('GitHub-Api:  ' + url.githubApiBase);
-		callback();
-	},
+    function (callback) {
+        console.log('bootstrap static files'.bold);
 
-	function(callback) {
+        config.server.static.forEach(function (p) {
+            app.use(sass_middleware({
+                src: p,
+                dest: p,
+                outputStyle: 'compressed',
+                force: config.server.always_recompile_sass
+            }));
+            app.use(express.static(p));
+        });
+        callback();
+    },
 
-		console.log('bootstrap static files'.bold);
+    // ////////////////////////////////////////////////////////////////////////////////////////////
+    // Bootstrap mongoose
+    // ////////////////////////////////////////////////////////////////////////////////////////////
 
-		config.server.static.forEach(function(p) {
-			app.use(sass_middleware({
-				src: p,
-				dest: p,
-				outputStyle: 'compressed',
-				force: config.server.always_recompile_sass
-			}));
-			app.use(express.static(p));
-		});
-		callback();
-	},
+    function (callback) {
+        retryInitializeMongoose(config.server.mongodb.uri, {
+            useMongoClient: true,
+            keepAlive: true
+        }, () => {
+            bootstrap('documents', callback);
+        });
 
-	//////////////////////////////////////////////////////////////////////////////////////////////
-	// Bootstrap mongoose
-	//////////////////////////////////////////////////////////////////////////////////////////////
+        app.use(expressSession({
+            secret: config.server.security.sessionSecret,
+            saveUninitialized: true,
+            resave: false,
+            cookie: {
+                maxAge: config.server.security.cookieMaxAge
+            },
+            store: new MongoStore({
+                mongooseConnection: mongoose.connection,
+                collection: 'cookieSession'
+            })
+        }));
+        app.use(passport.initialize());
+        app.use(passport.session());
 
-	function(callback) {
+        global.models = {};
+    },
 
-		console.log('bootstrap mongoose'.bold);
+    function (callback) {
+        bootstrap('passport', callback);
+    },
 
-		var mongoose = require('mongoose');
+    function (callback) {
+        bootstrap('controller', callback);
+    },
 
-		mongoose.connect(config.server.mongodb.uri, {
-			server: {
-				socketOptions: {
-					keepAlive: 1
-				}
-			}
-		});
+    function (callback) {
+        bootstrap('graphQueries', callback);
+    },
 
-		global.models = {};
+    function (callback) {
+        bootstrap('api', callback);
+    },
 
-		async.eachSeries(config.server.documents, function(p, cb) {
-			glob(p, function(err, file) {
-				if (err) {
-					console.log('! '.yellow + err);
-				}
-				if (file && file.length) {
-					file.forEach(function(f) {
-						try {
-							global.models = merge(global.models, require(f));
-							console.log('✓ '.bold.green + path.relative(process.cwd(), f));
-						} catch (ex) {
-							console.log('✖ '.bold.red + path.relative(process.cwd(), f));
-							console.log(ex.stack);
-						}
-					});
-					cb();
-				}
-			});
-		}, callback);
-	},
+    function (callback) {
+        bootstrap('webhooks', callback);
+    }
+], function (err) {
+    if (err) {
+        console.log('! '.yellow + err);
+    }
+    let log = require('./services/logger');
 
-	//////////////////////////////////////////////////////////////////////////////////////////////
-	// Bootstrap passport
-	//////////////////////////////////////////////////////////////////////////////////////////////
-
-	function(callback) {
-
-		console.log('bootstrap passport'.bold);
-
-		async.eachSeries(config.server.passport, function(p, cb) {
-			glob(p, function(err, file) {
-				if (err) {
-					console.log('! '.yellow + err);
-				}
-				if (file && file.length) {
-					file.forEach(function(f) {
-						console.log('✓ '.bold.green + path.relative(process.cwd(), f));
-						require(f);
-					});
-				}
-				cb();
-			});
-		}, callback);
-	},
-
-	//////////////////////////////////////////////////////////////////////////////////////////////
-	// Bootstrap controller
-	//////////////////////////////////////////////////////////////////////////////////////////////
-
-	function(callback) {
-
-		console.log('bootstrap controller'.bold);
-
-		async.eachSeries(config.server.controller, function(p, cb) {
-			glob(p, function(err, file) {
-				if (err) {
-					console.log('! '.yellow + err);
-				}
-				if (file && file.length) {
-					file.forEach(function(f) {
-						try {
-							app.use('/', require(f));
-							console.log('✓ '.bold.green + path.relative(process.cwd(), f));
-						} catch (ex) {
-							console.log('✖ '.bold.red + path.relative(process.cwd(), f));
-							console.log(ex.stack);
-						}
-					});
-				}
-				cb();
-			});
-		}, callback);
-	},
-
-	//////////////////////////////////////////////////////////////////////////////////////////////
-	// Bootstrap api
-	//////////////////////////////////////////////////////////////////////////////////////////////
-
-	function(callback) {
-
-		console.log('bootstrap api'.bold);
-
-		async.eachSeries(config.server.api, function(p, cb) {
-			glob(p, function(err, file) {
-				if (err) {
-					console.log('! '.yellow + err);
-				}
-				if (file && file.length) {
-					file.forEach(function(f) {
-						console.log('✓ '.bold.green + path.relative(process.cwd(), f));
-						api[path.basename(f, '.js')] = require(f);
-					});
-				}
-				cb();
-			});
-		}, callback);
-	},
-
-	//////////////////////////////////////////////////////////////////////////////////////////////
-	// Bootstrap webhooks
-	//////////////////////////////////////////////////////////////////////////////////////////////
-
-	function(callback) {
-
-		console.log('bootstrap webhooks'.bold);
-
-		async.eachSeries(config.server.webhooks, function(p, cb) {
-			glob(p, function(err, file) {
-				if (err) {
-					console.log('! '.yellow + err);
-				}
-				if (file && file.length) {
-					file.forEach(function(f) {
-						console.log('✓ '.bold.green + path.relative(process.cwd(), f));
-						webhooks[path.basename(f, '.js')] = require(f);
-					});
-				}
-				cb();
-			});
-		}, callback);
-	}
-], function(err) {
-	if (err) {
-		console.log('! '.yellow + err);
-	}
-	var log = require('./services/logger');
-
-	console.log('\n✓ '.bold.green + 'bootstrapped, '.bold + 'app listening on localhost:' + config.server.localport);
-	log.info('✓ bootstrapped !!! App listening on ' + config.server.http.host + ':' + config.server.http.port);
+    console.log('\n✓ '.bold.green + 'bootstrapped, '.bold + 'app listening on ' + config.server.http.host + ':' + config.server.localport);
+    log.info('✓ bootstrapped !!! App listening on ' + config.server.http.host + ':' + config.server.http.port);
 });
 
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 // Handle api calls
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 app.use('/api', require('./middleware/authenticated'));
 
-app.all('/api/:obj/:fun', function(req, res) {
-	res.set('Content-Type', 'application/json');
-	api[req.params.obj][req.params.fun](req, function(err, obj) {
-		if(err) {
-			return res.status(err.code > 0 ? err.code : 500).send(JSON.stringify(err.text || err));
-		}
-		if (obj) {
-			obj = req.params.obj === 'repo' ? cleanup.cleanObject(obj) : obj;
-			res.send(JSON.stringify(obj));
-		} else {
-			res.send();
-		}
-	});
+
+app.all('/api/:obj/:fun', function (req, res) {
+    res.set('Content-Type', 'application/json');
+    function apiSuccess(obj) {
+        if (obj !== undefined && obj !== null) {
+            obj = cleanup.cleanObject(obj);
+            res.send(JSON.stringify(obj));
+        } else {
+            res.send();
+        }
+    }
+    function apiFailure(err) {
+        if (err && typeof err === 'string') {
+            return res.status(500).send(err);
+        } else if (err) {
+            return res.status(err.code > 0 ? err.code : 500).send(JSON.stringify(err.text || err.message || err));
+        }
+    }
+
+    const promise = api[req.params.obj][req.params.fun](req, function (err, obj) {
+        return err ? apiFailure(err) : apiSuccess(obj);
+    });
+    if (promise) {
+        promise.then(apiSuccess, apiFailure);
+    }
 });
 
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 // Handle webhook calls
-//////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////
 
-app.all('/github/webhook/:repo', function(req, res) {
-	var event = req.headers['x-github-event'];
-	console.log('event ', event);
-	try {
-		if (!webhooks[event]) {
-			return res.status(400).send('Unsupported event');
-		}
-		webhooks[event](req, res);
-	} catch (err) {
-		res.status(500).send('Internal Server Error');
-	}
+app.all('/github/webhook/:repo', function (req, res) {
+    let event = req.headers['x-github-event'];
+    try {
+        if (!webhooks[event]) {
+            return res.status(400).send('Unsupported event');
+        }
+        webhooks[event](req, res);
+    } catch (err) {
+        res.status(500).send('Internal Server Error');
+    }
 });
+
+function retryInitializeMongoose(uri, options, callback) {
+    const defaultInterval = 1000;
+    mongoose.connect(uri, options, err => {
+        if (err) {
+            console.log(err, `Retry initialize mongoose in ${options.retryInitializeInterval || defaultInterval} milliseconds`);
+            setTimeout(() => {
+                retryInitializeMongoose(uri, options);
+            }, options.retryInitializeInterval || defaultInterval);
+        }
+        if (typeof callback === 'function') {
+            callback();
+        }
+    });
+}
 
 module.exports = app;
